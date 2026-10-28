@@ -1,0 +1,2 @@
+{"@timestamp":"2026-02-14T14:22:10.883Z","event.type":"start","event.category":"authentication","event.outcome":"success","source.ip":"10.0.50.42","user.name":"jsmith","host.name":"dc01.contoso.local","log.level":"info","message":"An account was successfully logged on."}
+{"@timestamp":"2026-02-14T15:45:33.221Z","event.type":"start","event.category":"authentication","event.outcome":"failure","source.ip":"10.99.0.55","user.name":"admin","host.name":"dc01.contoso.local","log.level":"info","message":"An account failed to log on."}
