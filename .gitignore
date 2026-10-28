@@ -1,0 +1,27 @@
+# Built binaries
+# `go build ./cmd` (no -o) writes a binary named "cmd" in the repo root.
+# The negation keeps the cmd/ source directory tracked.
+/cmd
+!/cmd/
+/lognorm
+/bin/
+*.exe
+
+# Service output from local runs (expected/ is unaffected: root-anchored)
+/*.ndjson
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.*
+*.prof
+
+# Go workspace (local only)
+go.work
+go.work.sum
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

@@ -1,158 +1,88 @@
-# Log Normalizer Service — Coding Exercise
+## Running the service
 
-A backend coding exercise for Data Integration Engineers. Build a small TCP server that accepts logs in two formats, parses them, and outputs normalized records. This exercise assesses data source wiring, schema mapping, and systems thinking relevant to log ingestion pipelines.
+Requires Go 1.27 (see `go.mod`).
 
-**Time estimate:** 2–3 hours
+```sh
+# Start the server (default :5044, output to stdout)
+go run ./cmd
 
----
-
-## Overview
-
-Build a **Log Normalizer Service** that:
-
-1. Listens on a TCP port for incoming log messages
-2. Accepts two input formats: **RFC 3164 syslog** and **NDJSON** (structured events, similar to Windows Event Log)
-3. Detects the format of each incoming message
-4. Parses and maps the data to a **normalized schema** (see [SCHEMA.md](SCHEMA.md))
-5. Outputs one NDJSON record per input to stdout or a configurable sink
-
-### Architecture
-
-```
-┌─────────────────┐     ┌─────────────────┐
-│ RFC 3164 Syslog │     │  NDJSON (JSON)  │
-└────────┬────────┘     └────────┬────────┘
-         │                       │
-         └───────────┬───────────┘
-                     ▼
-            ┌────────────────┐
-            │  TCP Server    │  (e.g., port 5044)
-            │  Listen + Read  │
-            └────────┬───────┘
-                     ▼
-            ┌────────────────┐
-            │ Format Detector│  (per line or per connection)
-            │ + Parser       │
-            └────────┬───────┘
-                     ▼
-            ┌────────────────┐
-            │ Schema Mapper   │  (map to normalized fields)
-            └────────┬───────┘
-                     ▼
-            ┌────────────────┐
-            │ NDJSON Output   │  (stdout or configurable)
-            └────────────────┘
+# Or build a binary first
+go build -o lognorm ./cmd && ./lognorm
 ```
 
----
+Flags:
 
-## Requirements
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-addr` | `:5044` | TCP listen address |
+| `-out` | `-` | Output file path (`-` for stdout). The file is created or truncated at startup |
+| `-max-line` | `1048576` | Max bytes per input line. A longer line closes that connection |
+| `-queue` | `10000` | Sink queue size. When it is full, senders are slowed by TCP backpressure |
+| `-verbose` | `true` | Log lines that fail to parse (`-verbose=false` to silence) |
 
-| Requirement | Description |
-|-------------|-------------|
-| **TCP listener** | Listen on a configurable TCP port (default: 5044) |
-| **Two input formats** | Accept RFC 3164 syslog and NDJSON (one JSON object per line) |
-| **Format detection** | Detect format per connection or per line. Document your choice and rationale. |
-| **Schema mapping** | Map all parsed fields to the normalized schema in `SCHEMA.md` |
-| **Output** | Emit one NDJSON record per input to stdout or a configurable sink (e.g., file) |
-| **Error handling** | Handle malformed input without crashing. Log or emit errors appropriately. |
+Stop with Ctrl-C. The server drains in-flight events, flushes, and prints
+`parsed`/`dropped` counts.
 
----
+## Sending input
 
-## Sample Data
+Send one message per line over TCP. In a second terminal:
 
-Sample input files are provided for testing. **Each file contains one message.** When sending over TCP, send one message per line. For syslog, each sample is a single line. For JSON, minify to one line per event (e.g., `jq -c . samples/json/sample-1.json`) so each TCP line carries one complete JSON object.
+```sh
+# Syslog (each sample is already a single line)
+nc -w1 localhost 5044 < samples/syslog/sample-1.log
 
-### `samples/syslog/`
+# JSON: the samples are pretty-printed, so minify them to one line with jq
+jq -c . samples/json/sample-1.json | nc -w1 localhost 5044
 
-| File | Description |
-|------|-------------|
-| `sample-1.log` | Auth success — RFC 3164 syslog with CEF message (successful logon) |
-| `sample-2.log` | Auth failure — RFC 3164 syslog with CEF message (failed logon) |
-| `sample-3.log` | Network event — RFC 3164 syslog with CEF message (traffic allowed) |
+# All samples at once
+{ for f in samples/json/*.json; do jq -c . "$f"; done; cat samples/syslog/*.log; } | nc -w1 localhost 5044
+```
 
-### `samples/json/`
+Records appear on stdout (or in the `-out` file) within about 100ms. Lines that
+fail to parse are logged to stderr and counted as dropped. The server keeps running.
 
-| File | Description |
-|------|-------------|
-| `sample-1.json` | Windows Event 4624 — logon success (nested `System`, `EventData`, `RenderingInfo`) |
-| `sample-2.json` | Windows Event 4625 — logon failure |
-| `sample-3.json` | Windows Event 4688 — process creation |
+### Writing output to a file
 
-Each JSON sample uses a Windows Event Log–like structure with nested objects. Your mapper must extract fields from these nested paths.
+```sh
+go run ./cmd -addr :5044 -out normalized.ndjson
+# in another terminal, send input as above, then:
+cat normalized.ndjson | jq .
+```
 
----
+## Error handling
 
-## Acceptance Criteria
+Lines that can't be parsed are dropped. Each one is logged to stderr and counted in the `dropped` stat. The connection and the
+server stay up. Try it:
 
-Your solution should:
+```sh
+# Truncated JSON: first 100 bytes of a real sample
+jq -c . samples/json/sample-1.json | head -c 100 | nc -w1 localhost 5044
 
-- [ ] Parse RFC 3164 syslog: priority, timestamp, hostname, and message
-- [ ] Parse CEF extensions when present (e.g., `src=`, `suser=`, `act=`) in syslog
-- [ ] Parse NDJSON: one JSON object per line
-- [ ] Extract `@timestamp` from both formats (syslog timestamp or `System.TimeCreated` / equivalent)
-- [ ] Extract `user.name` from both formats (e.g., CEF `suser`, JSON `EventData.TargetUserName`)
-- [ ] Extract `source.ip` when available
-- [ ] Map `event.category` and `event.outcome` using the rules in `SCHEMA.md`
-- [ ] Handle malformed input without crashing (e.g., invalid JSON, truncated syslog)
-- [ ] Output valid NDJSON (one record per line)
+# Valid JSON, but not a Windows event (no System object)
+jq -nc '{EventData:{TargetUserName:"bob"}}' | nc -w1 localhost 5044
 
----
+# Syslog with an out-of-range priority
+sed 's/^<134>/<999>/' samples/syslog/sample-1.log | nc -w1 localhost 5044
 
-## What We're Evaluating
+# Neither JSON nor syslog
+echo 'total garbage' | nc -w1 localhost 5044
+```
 
-| Criterion | What we look for |
-|-----------|------------------|
-| **Data mapping logic** | Correct nested field extraction; conditional categorization (event type, outcome); handling of `-` or empty values |
-| **Format detection** | Clear strategy (e.g., first character `{` → JSON); rationale for per-line vs per-connection detection |
-| **Systems awareness** | TCP handling; graceful degradation on bad input; consideration of batching, backpressure, or connection limits |
-| **Code organization** | Readable, organized, testable structure |
-| **AI usage disclosure** | `AI_USAGE.md` present and honest (see below) |
+Server log (stderr):
 
----
+```
+parse (ndjson): invalid json: unexpected EOF: "{\"System\":{\"Provider\":{\"Name\":\"Microsoft-Windows-Security-Auditing\",\"Guid\":\"{54849625-5478-4994-a5ba"
+parse (ndjson): missing System object: "{\"EventData\":{\"TargetUserName\":\"bob\"}}"
+parse (rfc3164): invalid syslog priority 999 (max 191): "<999>Dec 05 10:30:45 192.168.1.1 CEF:0|Microsoft|Windows|10.0|4624|...
+parse (rfc3164): not syslog: missing <PRI> prefix: "total garbage"
+stats: parsed=0 dropped=4
+```
 
-## Language & Scope
+## Tests
 
-- **Language:** Any (Go, Python, Node, Rust, etc.)
-- **Time:** 2–3 hours. Prioritize: (1) parsing both formats, (2) schema mapping, (3) systems considerations.
-- **Tradeoffs:** If time is short, focus on mapping accuracy over batching or advanced TCP behavior. Document what you would do with more time.
-
----
-
-## AI Usage
-
-Use of AI tools (e.g., ChatGPT, Copilot, Cursor) is **allowed**. We want to see how you work with these tools.
-
-Please document your usage in `AI_USAGE.md`:
-
-- What tools you used
-- What you used them for (e.g., boilerplate, parsing logic, debugging)
-- What you wrote yourself vs. generated
-
-Honest disclosure is required. We evaluate your integration and mapping choices, not whether you used AI.
-
----
-
-## Expected Output
-
-See `expected/sample-output.ndjson` for example normalized records. Use these to validate your mapper output format and field values.
-
----
-
-## Getting Started
-
-1. Read [SCHEMA.md](SCHEMA.md) for the target schema and mapping rules
-2. Review the sample files in `samples/syslog/` and `samples/json/`
-3. Implement the service
-4. Test with the sample data (e.g., `nc` or a small script to send samples over TCP). Syslog samples are single-line; for JSON, send one minified object per line
-5. Create `AI_USAGE.md` before submitting
-
----
-
-## Submission
-
-When complete, ensure your repository includes:
-
-- Implementation code
-- Brief README or instructions on how to run and test
-- `AI_USAGE.md` with your AI usage disclosure
+```sh
+go test ./...            # all packages
+go test -race ./...      # with the race detector (recommended)
+go vet ./...
+go test -bench=. -run='^$' ./internal/parse/...   # parser benchmarks
+```
